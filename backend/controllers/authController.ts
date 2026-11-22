@@ -12,6 +12,7 @@ const OTP_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
 const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('bookhaven-invalid-login', 10);
 
 function generateSixDigitOtp(): string {
   return crypto.randomInt(0, 1000000).toString().padStart(6, '0');
@@ -19,36 +20,60 @@ function generateSixDigitOtp(): string {
 
 export async function registerUser(req: Request, res: Response): Promise<void> {
   try {
-    const { name, email, password } = req.body as {
+    const { name, username, email, password, confirmPassword } = req.body as {
       name?: string;
+      username?: string;
       email?: string;
       password?: string;
+      confirmPassword?: string;
     };
 
-    if (!name || name.trim().length < 2) {
+    if (typeof name !== 'string' || name.trim().length < 2) {
       res.status(400).json({ message: 'Please enter your full name (at least 2 characters).' });
       return;
     }
-    if (!email || !/^\S+@\S+\.\S+$/.test(email.trim())) {
+    if (typeof email !== 'string' || !/^\S+@\S+\.\S+$/.test(email.trim())) {
       res.status(400).json({ message: 'Please provide a valid email address.' });
       return;
     }
-    if (!password || password.length < 6) {
+    if (typeof username !== 'string' || !/^[a-zA-Z0-9._-]{3,30}$/.test(username.trim())) {
+      res.status(400).json({
+        message: 'Username must be 3-30 characters and contain only letters, numbers, dots, underscores, or hyphens.',
+      });
+      return;
+    }
+    if (typeof password !== 'string' || password.length < 6) {
       res.status(400).json({ message: 'Password must be at least 6 characters.' });
+      return;
+    }
+    if (typeof confirmPassword !== 'string' || confirmPassword !== password) {
+      res.status(400).json({ message: 'Passwords do not match.' });
       return;
     }
 
     const normalizedEmail = email.trim().toLowerCase();
+    const normalizedUsername = username.trim().toLowerCase();
     const trimmedName = name.trim();
     const now = Date.now();
 
     if (isMongoConnected()) {
-      const existing = await UserModel.findOne({ email: normalizedEmail }).select(
-        '+otpLastSentAt +otpLockedUntil'
-      );
+      const existing = await UserModel.findOne({ email: normalizedEmail })
+        .collation({ locale: 'en', strength: 2 })
+        .select('+otpLastSentAt +otpLockedUntil');
 
       if (existing && existing.isVerified) {
         res.status(409).json({ message: 'An account with this email already exists.' });
+        return;
+      }
+
+      const usernameOwner = await UserModel.findOne({
+        username: normalizedUsername,
+        email: { $ne: normalizedEmail },
+      })
+        .collation({ locale: 'en', strength: 2 })
+        .select('_id');
+      if (usernameOwner) {
+        res.status(409).json({ message: 'This username is already taken.' });
         return;
       }
 
@@ -81,6 +106,7 @@ export async function registerUser(req: Request, res: Response): Promise<void> {
 
       if (existing && !existing.isVerified) {
         existing.name = trimmedName;
+        existing.username = normalizedUsername;
         existing.password = password;
         existing.otpHash = otpHash;
         existing.otpExpires = otpExpires;
@@ -91,6 +117,7 @@ export async function registerUser(req: Request, res: Response): Promise<void> {
       } else {
         await UserModel.create({
           name: trimmedName,
+          username: normalizedUsername,
           email: normalizedEmail,
           password,
           role: 'customer',
@@ -114,9 +141,20 @@ export async function registerUser(req: Request, res: Response): Promise<void> {
 
     // Local transactional store validation before sending email
     const dbSnapshot = loadStore();
-    const existingLocal = dbSnapshot.users.find((u) => u.email === normalizedEmail);
+    const existingLocal = dbSnapshot.users.find(
+      (u) => u.email.trim().toLowerCase() === normalizedEmail
+    );
     if (existingLocal && existingLocal.isVerified) {
       res.status(409).json({ message: 'An account with this email already exists.' });
+      return;
+    }
+    const usernameOwnerLocal = dbSnapshot.users.find(
+      (u) =>
+        u.username?.trim().toLowerCase() === normalizedUsername &&
+        u.email.trim().toLowerCase() !== normalizedEmail
+    );
+    if (usernameOwnerLocal) {
+      res.status(409).json({ message: 'This username is already taken.' });
       return;
     }
     if (existingLocal?.otpLockedUntil && new Date(existingLocal.otpLockedUntil).getTime() > now) {
@@ -150,9 +188,19 @@ export async function registerUser(req: Request, res: Response): Promise<void> {
     await sendOtpEmail(normalizedEmail, trimmedName, otp);
 
     await runStoreTransaction(async (db) => {
-      const existing = db.users.find((u) => u.email === normalizedEmail);
+      const existing = db.users.find((u) => u.email.trim().toLowerCase() === normalizedEmail);
       if (existing && existing.isVerified) {
         const err = new Error('An account with this email already exists.') as Error & { status?: number };
+        err.status = 409;
+        throw err;
+      }
+      const usernameOwner = db.users.find(
+        (u) =>
+          u.username?.trim().toLowerCase() === normalizedUsername &&
+          u.email.trim().toLowerCase() !== normalizedEmail
+      );
+      if (usernameOwner) {
+        const err = new Error('This username is already taken.') as Error & { status?: number };
         err.status = 409;
         throw err;
       }
@@ -162,6 +210,7 @@ export async function registerUser(req: Request, res: Response): Promise<void> {
 
       if (existing && !existing.isVerified) {
         existing.name = trimmedName;
+        existing.username = normalizedUsername;
         existing.password = hashedPassword;
         existing.otpHash = otpHash;
         existing.otpExpires = otpExpiresIso;
@@ -173,6 +222,7 @@ export async function registerUser(req: Request, res: Response): Promise<void> {
         db.users.push({
           _id: generateObjectId(),
           name: trimmedName,
+          username: normalizedUsername,
           email: normalizedEmail,
           password: hashedPassword,
           role: 'customer',
@@ -204,10 +254,30 @@ export async function registerUser(req: Request, res: Response): Promise<void> {
       expiresInSeconds: 300,
     });
   } catch (err) {
-    const error = err as Error & { status?: number; code?: string };
+    const error = err as Error & {
+      status?: number;
+      code?: number | string;
+      keyPattern?: Record<string, number>;
+    };
+    if (error.code === 11000) {
+      const duplicateField = error.keyPattern?.username
+        ? 'username'
+        : error.keyPattern?.email
+          ? 'email'
+          : null;
+      res.status(409).json({
+        message:
+          duplicateField === 'username'
+            ? 'This username is already taken.'
+            : duplicateField === 'email'
+              ? 'An account with this email already exists.'
+              : 'An account with this email or username already exists.',
+      });
+      return;
+    }
     res.status(error.status || 500).json({
       message: error.message || 'Registration failed.',
-      code: error.code,
+      code: typeof error.code === 'string' ? error.code : undefined,
     });
   }
 }
@@ -226,9 +296,9 @@ export async function verifyOtp(req: Request, res: Response): Promise<void> {
     const now = Date.now();
 
     if (isMongoConnected()) {
-      const user = await UserModel.findOne({ email: normalizedEmail }).select(
-        '+otpHash +otpExpires +otpAttempts +otpLockedUntil'
-      );
+      const user = await UserModel.findOne({ email: normalizedEmail })
+        .collation({ locale: 'en', strength: 2 })
+        .select('+otpHash +otpExpires +otpAttempts +otpLockedUntil');
       if (!user) {
         res.status(404).json({ message: 'Account not found.' });
         return;
@@ -300,6 +370,7 @@ export async function verifyOtp(req: Request, res: Response): Promise<void> {
         user: {
           id: user._id.toString(),
           name: user.name,
+          username: user.username,
           email: user.email,
           role: user.role,
           isVerified: user.isVerified,
@@ -311,7 +382,9 @@ export async function verifyOtp(req: Request, res: Response): Promise<void> {
     }
 
     const dbCheck = loadStore();
-    const candidate = dbCheck.users.find((u) => u.email === normalizedEmail);
+    const candidate = dbCheck.users.find(
+      (u) => u.email.trim().toLowerCase() === normalizedEmail
+    );
     if (!candidate) {
       res.status(404).json({ message: 'Account not found.' });
       return;
@@ -334,7 +407,9 @@ export async function verifyOtp(req: Request, res: Response): Promise<void> {
 
     if (new Date(candidate.otpExpires).getTime() < now) {
       await runStoreTransaction((db) => {
-        const user = db.users.find((u) => u.email === normalizedEmail);
+        const user = db.users.find(
+          (u) => u.email.trim().toLowerCase() === normalizedEmail
+        );
         if (user) {
           user.otpHash = null;
           user.otpExpires = null;
@@ -348,7 +423,9 @@ export async function verifyOtp(req: Request, res: Response): Promise<void> {
     const isMatch = await bcrypt.compare(cleanOtp, candidate.otpHash);
     if (!isMatch) {
       const attemptResult = await runStoreTransaction((db) => {
-        const user = db.users.find((u) => u.email === normalizedEmail);
+        const user = db.users.find(
+          (u) => u.email.trim().toLowerCase() === normalizedEmail
+        );
         if (!user) return { locked: false, remaining: 0 };
         user.otpAttempts = (user.otpAttempts || 0) + 1;
         user.updatedAt = new Date(now).toISOString();
@@ -375,7 +452,9 @@ export async function verifyOtp(req: Request, res: Response): Promise<void> {
     }
 
     const verifiedUser = await runStoreTransaction((db) => {
-      const user = db.users.find((u) => u.email === normalizedEmail);
+      const user = db.users.find(
+        (u) => u.email.trim().toLowerCase() === normalizedEmail
+      );
       if (!user) {
         const err = new Error('Account not found.') as Error & { status?: number };
         err.status = 404;
@@ -405,6 +484,7 @@ export async function verifyOtp(req: Request, res: Response): Promise<void> {
       user: {
         id: verifiedUser._id,
         name: verifiedUser.name,
+        username: verifiedUser.username,
         email: verifiedUser.email,
         role: verifiedUser.role,
         isVerified: verifiedUser.isVerified,
@@ -434,9 +514,9 @@ export async function resendOtp(req: Request, res: Response): Promise<void> {
     const otpLastSentAt = new Date(now);
 
     if (isMongoConnected()) {
-      const user = await UserModel.findOne({ email: normalizedEmail }).select(
-        '+otpLastSentAt +otpLockedUntil'
-      );
+      const user = await UserModel.findOne({ email: normalizedEmail })
+        .collation({ locale: 'en', strength: 2 })
+        .select('+otpLastSentAt +otpLockedUntil');
       if (!user) {
         res.status(404).json({ message: 'No account found with this email.' });
         return;
@@ -480,7 +560,9 @@ export async function resendOtp(req: Request, res: Response): Promise<void> {
     }
 
     const dbSnapshot = loadStore();
-    const userLocal = dbSnapshot.users.find((u) => u.email === normalizedEmail);
+    const userLocal = dbSnapshot.users.find(
+      (u) => u.email.trim().toLowerCase() === normalizedEmail
+    );
     if (!userLocal) {
       res.status(404).json({ message: 'No account found with this email.' });
       return;
@@ -513,7 +595,9 @@ export async function resendOtp(req: Request, res: Response): Promise<void> {
     await sendOtpEmail(normalizedEmail, userLocal.name, otp);
 
     await runStoreTransaction((db) => {
-      const user = db.users.find((u) => u.email === normalizedEmail);
+      const user = db.users.find(
+        (u) => u.email.trim().toLowerCase() === normalizedEmail
+      );
       if (!user) return;
       user.otpHash = otpHash;
       user.otpExpires = otpExpires.toISOString();
@@ -538,18 +622,35 @@ export async function resendOtp(req: Request, res: Response): Promise<void> {
 
 export async function loginUser(req: Request, res: Response): Promise<void> {
   try {
-    const { email, password } = req.body as { email?: string; password?: string };
-    if (!email || !password) {
-      res.status(400).json({ message: 'Please enter both email and password.' });
+    const { identifier, email, password } = req.body as {
+      identifier?: string;
+      email?: string;
+      password?: string;
+    };
+    const loginIdentifier = identifier ?? email;
+    if (
+      typeof loginIdentifier !== 'string' ||
+      !loginIdentifier.trim() ||
+      typeof password !== 'string' ||
+      !password
+    ) {
+      res.status(400).json({ message: 'Please enter an email or username and password.' });
       return;
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedIdentifier = loginIdentifier.trim().toLowerCase();
 
     if (isMongoConnected()) {
-      const user = await UserModel.findOne({ email: normalizedEmail }).select('+password');
-      if (!user || !(await user.comparePassword(password))) {
-        res.status(401).json({ message: 'Invalid email or password.' });
+      const user = await UserModel.findOne({
+        $or: [{ email: normalizedIdentifier }, { username: normalizedIdentifier }],
+      })
+        .collation({ locale: 'en', strength: 2 })
+        .select('+password');
+      const passwordMatches = user
+        ? await user.comparePassword(password)
+        : await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+      if (!user || !passwordMatches) {
+        res.status(401).json({ message: 'Invalid email/username or password.' });
         return;
       }
       if (!user.isVerified) {
@@ -574,6 +675,7 @@ export async function loginUser(req: Request, res: Response): Promise<void> {
         user: {
           id: user._id.toString(),
           name: user.name,
+          username: user.username,
           email: user.email,
           role: user.role,
           isVerified: user.isVerified,
@@ -585,9 +687,17 @@ export async function loginUser(req: Request, res: Response): Promise<void> {
     }
 
     const db = loadStore();
-    const user = db.users.find((u) => u.email === normalizedEmail);
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      res.status(401).json({ message: 'Invalid email or password.' });
+    const user = db.users.find(
+      (u) =>
+        u.email.trim().toLowerCase() === normalizedIdentifier ||
+        u.username?.trim().toLowerCase() === normalizedIdentifier
+    );
+    const passwordMatches = await bcrypt.compare(
+      password,
+      user?.password ?? DUMMY_PASSWORD_HASH
+    );
+    if (!user || !passwordMatches) {
+      res.status(401).json({ message: 'Invalid email/username or password.' });
       return;
     }
     if (!user.isVerified) {
@@ -612,6 +722,7 @@ export async function loginUser(req: Request, res: Response): Promise<void> {
       user: {
         id: user._id,
         name: user.name,
+        username: user.username,
         email: user.email,
         role: user.role,
         isVerified: user.isVerified,
@@ -620,7 +731,8 @@ export async function loginUser(req: Request, res: Response): Promise<void> {
       },
     });
   } catch (err) {
-    res.status(500).json({ message: (err as Error).message || 'Login failed.' });
+    console.error('[BookHaven Auth] Login failed:', err);
+    res.status(500).json({ message: 'Unable to sign in right now. Please try again later.' });
   }
 }
 
@@ -641,6 +753,7 @@ export async function getProfile(req: AuthenticatedRequest, res: Response): Prom
         user: {
           id: user._id.toString(),
           name: user.name,
+          username: user.username,
           email: user.email,
           role: user.role,
           isVerified: user.isVerified,
@@ -661,6 +774,7 @@ export async function getProfile(req: AuthenticatedRequest, res: Response): Prom
       user: {
         id: user._id,
         name: user.name,
+        username: user.username,
         email: user.email,
         role: user.role,
         isVerified: user.isVerified,
@@ -704,6 +818,7 @@ export async function updateProfile(req: AuthenticatedRequest, res: Response): P
         user: {
           id: user._id.toString(),
           name: user.name,
+          username: user.username,
           email: user.email,
           role: user.role,
           isVerified: user.isVerified,
@@ -731,6 +846,7 @@ export async function updateProfile(req: AuthenticatedRequest, res: Response): P
       user: {
         id: updated._id,
         name: updated.name,
+        username: updated.username,
         email: updated.email,
         role: updated.role,
         isVerified: updated.isVerified,
