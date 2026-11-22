@@ -17,7 +17,12 @@ export interface AuthenticatedRequest extends Request {
 }
 
 export function getJwtSecret(): string {
-  return process.env.JWT_SECRET?.trim() || 'bookhaven_dev_jwt_secret_key_change_in_prod';
+  const secret = process.env.JWT_SECRET?.trim();
+  if (secret) return secret;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET must be configured in production.');
+  }
+  return 'bookhaven_dev_jwt_secret_key_change_in_prod';
 }
 
 export function signAuthToken(user: AuthUserPayload): string {
