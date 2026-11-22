@@ -12,6 +12,7 @@ export interface ShippingAddress {
 export interface User {
   id: string;
   name: string;
+  username?: string;
   email: string;
   role: UserRole;
   isVerified: boolean;
