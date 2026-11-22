@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, Mail, KeyRound, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
+import {
+  X,
+  Mail,
+  KeyRound,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
+  Eye,
+  EyeOff,
+} from 'lucide-react';
 import { useLanguage } from '../i18n/LanguageContext';
 import { apiRequest, setStoredToken } from '../lib/api';
 import { User } from '../types';
@@ -16,8 +25,13 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
   const { t } = useLanguage();
   const [step, setStep] = useState<AuthStep>('login');
   const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [confirmPasswordVisible, setConfirmPasswordVisible] = useState(false);
   const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
   const [secondsLeft, setSecondsLeft] = useState(300);
   const [resendCooldown, setResendCooldown] = useState(0);
@@ -58,11 +72,15 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     resetMessages();
+    if (!identifier.trim() || !password) {
+      setError(t.auth.loginFieldsRequired);
+      return;
+    }
     setLoading(true);
     try {
       const res = await apiRequest<{ token: string; user: User }>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ identifier, password }),
       });
       setStoredToken(res.token);
       onAuthenticated(res.user);
@@ -70,6 +88,7 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
     } catch (err) {
       const eObj = err as Error & { data?: { needsVerification?: boolean; email?: string } };
       if (eObj.data?.needsVerification) {
+        if (eObj.data.email) setEmail(eObj.data.email);
         setStep('verify-otp');
         setSecondsLeft(300);
         setInfo(t.auth.unverifiedInfo);
@@ -84,6 +103,10 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     resetMessages();
+    if (password !== confirmPassword) {
+      setError(t.auth.passwordsDoNotMatch);
+      return;
+    }
     setLoading(true);
     try {
       const res = await apiRequest<{
@@ -93,7 +116,7 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
         expiresInSeconds?: number;
       }>('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify({ name, username, email, password, confirmPassword }),
       });
       setEmail(res.email);
       setOtpDigits(['', '', '', '', '', '']);
@@ -193,10 +216,10 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
     resetMessages();
     setStep('login');
     if (role === 'customer') {
-      setEmail('aye@bookhaven.mm');
+      setIdentifier('aye@bookhaven.mm');
       setPassword('Customer123!');
     } else {
-      setEmail('admin@bookhaven.mm');
+      setIdentifier('admin@bookhaven.mm');
       setPassword('Admin123!');
     }
   };
@@ -274,17 +297,20 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
           )}
 
           {step === 'login' && (
-            <form onSubmit={handleLogin} className="space-y-4">
+            <form onSubmit={handleLogin} noValidate className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-[#18181B] mb-1.5">
-                  {t.auth.emailLabel}
+                  {t.auth.loginIdentifierLabel}
                 </label>
                 <input
-                  type="email"
+                  id="identifier"
+                  name="identifier"
+                  type="text"
                   required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder={t.auth.emailPlaceholderLogin}
+                  autoComplete="username"
+                  value={identifier}
+                  onChange={(e) => setIdentifier(e.target.value)}
+                  placeholder={t.auth.loginIdentifierPlaceholder}
                   className="w-full px-3.5 py-2.5 text-sm bg-white border border-[#D4D0C7] rounded-lg focus:outline-none focus:border-[#0F5132]"
                 />
               </div>
@@ -292,14 +318,27 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
                 <label className="block text-sm font-medium text-[#18181B] mb-1.5">
                   {t.auth.passwordLabel}
                 </label>
-                <input
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={t.auth.passwordPlaceholderLogin}
-                  className="w-full px-3.5 py-2.5 text-sm bg-white border border-[#D4D0C7] rounded-lg focus:outline-none focus:border-[#0F5132]"
-                />
+                <div className="relative">
+                  <input
+                    type={passwordVisible ? 'text' : 'password'}
+                    name="password"
+                    autoComplete="current-password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={t.auth.passwordPlaceholderLogin}
+                    className="w-full px-3.5 py-2.5 pr-11 text-sm bg-white border border-[#D4D0C7] rounded-lg focus:outline-none focus:border-[#0F5132]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPasswordVisible((visible) => !visible)}
+                    aria-label={passwordVisible ? t.auth.hidePassword : t.auth.showPassword}
+                    aria-pressed={passwordVisible}
+                    className="absolute inset-y-0 right-0 flex items-center px-3 text-[#52525B] hover:text-[#18181B]"
+                  >
+                    {passwordVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
               </div>
 
               <button
@@ -350,6 +389,23 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
               </div>
               <div>
                 <label className="block text-sm font-medium text-[#18181B] mb-1.5">
+                  {t.auth.usernameLabel}
+                </label>
+                <input
+                  type="text"
+                  required
+                  minLength={3}
+                  maxLength={30}
+                  pattern="[A-Za-z0-9._-]{3,30}"
+                  autoComplete="username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder={t.auth.usernamePlaceholder}
+                  className="w-full px-3.5 py-2.5 text-sm bg-white border border-[#D4D0C7] rounded-lg focus:outline-none focus:border-[#0F5132]"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#18181B] mb-1.5">
                   {t.auth.emailLabel}
                 </label>
                 <input
@@ -365,15 +421,61 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }: AuthModalProps) 
                 <label className="block text-sm font-medium text-[#18181B] mb-1.5">
                   {t.auth.passwordLabel}
                 </label>
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={t.auth.passwordPlaceholderReg}
-                  className="w-full px-3.5 py-2.5 text-sm bg-white border border-[#D4D0C7] rounded-lg focus:outline-none focus:border-[#0F5132]"
-                />
+                <div className="relative">
+                  <input
+                    type={passwordVisible ? 'text' : 'password'}
+                    name="password"
+                    autoComplete="new-password"
+                    required
+                    minLength={6}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={t.auth.passwordPlaceholderReg}
+                    className="w-full px-3.5 py-2.5 pr-11 text-sm bg-white border border-[#D4D0C7] rounded-lg focus:outline-none focus:border-[#0F5132]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPasswordVisible((visible) => !visible)}
+                    aria-label={passwordVisible ? t.auth.hidePassword : t.auth.showPassword}
+                    aria-pressed={passwordVisible}
+                    className="absolute inset-y-0 right-0 flex items-center px-3 text-[#52525B] hover:text-[#18181B]"
+                  >
+                    {passwordVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#18181B] mb-1.5">
+                  {t.auth.confirmPasswordLabel}
+                </label>
+                <div className="relative">
+                  <input
+                    type={confirmPasswordVisible ? 'text' : 'password'}
+                    name="confirmPassword"
+                    autoComplete="new-password"
+                    required
+                    minLength={6}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder={t.auth.confirmPasswordPlaceholder}
+                    className="w-full px-3.5 py-2.5 pr-11 text-sm bg-white border border-[#D4D0C7] rounded-lg focus:outline-none focus:border-[#0F5132]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setConfirmPasswordVisible((visible) => !visible)}
+                    aria-label={
+                      confirmPasswordVisible ? t.auth.hidePassword : t.auth.showPassword
+                    }
+                    aria-pressed={confirmPasswordVisible}
+                    className="absolute inset-y-0 right-0 flex items-center px-3 text-[#52525B] hover:text-[#18181B]"
+                  >
+                    {confirmPasswordVisible ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
               </div>
 
               <button
