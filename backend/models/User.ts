@@ -13,6 +13,7 @@ export interface IShippingAddress {
 export interface IUser extends Document {
   _id: mongoose.Types.ObjectId;
   name: string;
+  username?: string;
   email: string;
   password: string;
   role: 'customer' | 'staff' | 'admin';
@@ -51,6 +52,19 @@ const userSchema = new Schema<IUser>(
       trim: true,
       minlength: [2, 'Name must be at least 2 characters'],
       maxlength: [80, 'Name cannot exceed 80 characters'],
+    },
+    username: {
+      type: String,
+      required: function (this: IUser) {
+        return this.isNew;
+      },
+      unique: true,
+      sparse: true,
+      lowercase: true,
+      trim: true,
+      minlength: [3, 'Username must be at least 3 characters'],
+      maxlength: [30, 'Username cannot exceed 30 characters'],
+      match: [/^[a-z0-9._-]+$/, 'Username may only contain letters, numbers, dots, underscores, and hyphens'],
     },
     email: {
       type: String,
