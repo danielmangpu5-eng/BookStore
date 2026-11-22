@@ -10,15 +10,25 @@ export function createRateLimiter(options: {
   maxRequests: number;
   keyPrefix: string;
   message: string;
+  keyByIpOnly?: boolean;
 }) {
   const buckets = new Map<string, RateBucket>();
+  let nextCleanupAt = Date.now() + Math.min(options.windowMs, 60_000);
 
   return (req: Request, res: Response, next: NextFunction): void => {
     const now = Date.now();
+    if (now >= nextCleanupAt) {
+      for (const [key, bucket] of buckets) {
+        if (bucket.resetAt <= now) buckets.delete(key);
+      }
+      nextCleanupAt = now + Math.min(options.windowMs, 60_000);
+    }
+
     const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-    const emailPart =
-      typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-    const key = `${options.keyPrefix}:${clientIp}:${emailPart}`;
+    const identity = req.body?.identifier ?? req.body?.email;
+    const identityPart =
+      !options.keyByIpOnly && typeof identity === 'string' ? identity.trim().toLowerCase() : '';
+    const key = `${options.keyPrefix}:${clientIp}:${identityPart}`;
 
     const existing = buckets.get(key);
     if (!existing || existing.resetAt <= now) {
