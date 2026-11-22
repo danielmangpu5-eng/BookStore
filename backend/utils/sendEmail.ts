@@ -79,8 +79,10 @@ export async function sendOtpEmail(toEmail: string, name: string, otp: string): 
       subject,
       html,
     });
+  
   } catch (err) {
-    console.error('[BookHaven Mailer] Resend request failed:', (err as Error).message);
+    console.error('[BookHaven Mailer] Resend request failed:', err);
+
     throw new EmailDeliveryError(
       'Unable to reach the Resend email service. Please try again shortly.',
       502,
@@ -88,16 +90,18 @@ export async function sendOtpEmail(toEmail: string, name: string, otp: string): 
     );
   }
 
-  if (result.error || !result.data?.id) {
-    const providerMessage = result.error?.message || 'Unknown Resend API error';
-    console.error('[BookHaven Mailer] Resend API error:', providerMessage);
 
-    throw new EmailDeliveryError(
-      process.env.NODE_ENV !== 'production'
-        ? `Resend email delivery failed: ${providerMessage}`
-        : 'Failed to deliver verification email. Please verify your email address and try again.',
-      502,
-      'EMAIL_DELIVERY_FAILED'
-    );
-  }
+  if (result.error || !result.data?.id) {
+  console.error('[Resend Full Error]:', {
+    name: result.error?.name,
+    message: result.error?.message,
+    statusCode: result.error?.statusCode,
+  });
+
+  throw new EmailDeliveryError(
+    `Resend failed: ${result.error?.message || 'Unknown error'}`,
+    502,
+    'EMAIL_DELIVERY_FAILED'
+  );
+}
 }
