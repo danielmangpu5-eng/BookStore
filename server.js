@@ -102,6 +102,7 @@ function buildSeedData() {
     {
       _id: customerId,
       name: "Aye Chan Moe",
+      username: "ayechanmoe",
       email: "aye@bookhaven.mm",
       password: customerPassword,
       role: "customer",
@@ -126,6 +127,7 @@ function buildSeedData() {
     {
       _id: adminId,
       name: "Thant Zin Oo",
+      username: "admin",
       email: "admin@bookhaven.mm",
       password: adminPassword,
       role: "admin",
@@ -684,6 +686,19 @@ var userSchema = new Schema3(
       minlength: [2, "Name must be at least 2 characters"],
       maxlength: [80, "Name cannot exceed 80 characters"]
     },
+    username: {
+      type: String,
+      required: function() {
+        return this.isNew;
+      },
+      unique: true,
+      sparse: true,
+      lowercase: true,
+      trim: true,
+      minlength: [3, "Username must be at least 3 characters"],
+      maxlength: [30, "Username cannot exceed 30 characters"],
+      match: [/^[a-z0-9._-]+$/, "Username may only contain letters, numbers, dots, underscores, and hyphens"]
+    },
     email: {
       type: String,
       required: [true, "Email address is required"],
@@ -1137,7 +1152,12 @@ async function getAdminActivity(_req, res) {
 // backend/middleware/authMiddleware.ts
 import jwt from "jsonwebtoken";
 function getJwtSecret() {
-  return process.env.JWT_SECRET?.trim() || "bookhaven_dev_jwt_secret_key_change_in_prod";
+  const secret = process.env.JWT_SECRET?.trim();
+  if (secret) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET must be configured in production.");
+  }
+  return "bookhaven_dev_jwt_secret_key_change_in_prod";
 }
 function signAuthToken(user) {
   return jwt.sign(
@@ -1287,7 +1307,7 @@ async function sendOtpEmail(toEmail, name, otp) {
       html
     });
   } catch (err) {
-    console.error("[BookHaven Mailer] Resend request failed:", err.message);
+    console.error("[BookHaven Mailer] Resend request failed:", err);
     throw new EmailDeliveryError(
       "Unable to reach the Resend email service. Please try again shortly.",
       502,
@@ -1295,10 +1315,13 @@ async function sendOtpEmail(toEmail, name, otp) {
     );
   }
   if (result.error || !result.data?.id) {
-    const providerMessage = result.error?.message || "Unknown Resend API error";
-    console.error("[BookHaven Mailer] Resend API error:", providerMessage);
+    console.error("[Resend Full Error]:", {
+      name: result.error?.name,
+      message: result.error?.message,
+      statusCode: result.error?.statusCode
+    });
     throw new EmailDeliveryError(
-      process.env.NODE_ENV !== "production" ? `Resend email delivery failed: ${providerMessage}` : "Failed to deliver verification email. Please verify your email address and try again.",
+      `Resend failed: ${result.error?.message || "Unknown error"}`,
       502,
       "EMAIL_DELIVERY_FAILED"
     );
@@ -1310,33 +1333,51 @@ var OTP_EXPIRY_MS = 5 * 60 * 1e3;
 var RESEND_COOLDOWN_MS = 60 * 1e3;
 var MAX_OTP_ATTEMPTS = 5;
 var OTP_LOCKOUT_MS = 15 * 60 * 1e3;
+var DUMMY_PASSWORD_HASH = bcrypt3.hashSync("bookhaven-invalid-login", 10);
 function generateSixDigitOtp() {
   return crypto.randomInt(0, 1e6).toString().padStart(6, "0");
 }
 async function registerUser(req, res) {
   try {
-    const { name, email, password } = req.body;
-    if (!name || name.trim().length < 2) {
+    const { name, username, email, password, confirmPassword } = req.body;
+    if (typeof name !== "string" || name.trim().length < 2) {
       res.status(400).json({ message: "Please enter your full name (at least 2 characters)." });
       return;
     }
-    if (!email || !/^\S+@\S+\.\S+$/.test(email.trim())) {
+    if (typeof email !== "string" || !/^\S+@\S+\.\S+$/.test(email.trim())) {
       res.status(400).json({ message: "Please provide a valid email address." });
       return;
     }
-    if (!password || password.length < 6) {
+    if (typeof username !== "string" || !/^[a-zA-Z0-9._-]{3,30}$/.test(username.trim())) {
+      res.status(400).json({
+        message: "Username must be 3-30 characters and contain only letters, numbers, dots, underscores, or hyphens."
+      });
+      return;
+    }
+    if (typeof password !== "string" || password.length < 6) {
       res.status(400).json({ message: "Password must be at least 6 characters." });
       return;
     }
+    if (typeof confirmPassword !== "string" || confirmPassword !== password) {
+      res.status(400).json({ message: "Passwords do not match." });
+      return;
+    }
     const normalizedEmail = email.trim().toLowerCase();
+    const normalizedUsername = username.trim().toLowerCase();
     const trimmedName = name.trim();
     const now = Date.now();
     if (isMongoConnected()) {
-      const existing = await UserModel.findOne({ email: normalizedEmail }).select(
-        "+otpLastSentAt +otpLockedUntil"
-      );
+      const existing = await UserModel.findOne({ email: normalizedEmail }).collation({ locale: "en", strength: 2 }).select("+otpLastSentAt +otpLockedUntil");
       if (existing && existing.isVerified) {
         res.status(409).json({ message: "An account with this email already exists." });
+        return;
+      }
+      const usernameOwner = await UserModel.findOne({
+        username: normalizedUsername,
+        email: { $ne: normalizedEmail }
+      }).collation({ locale: "en", strength: 2 }).select("_id");
+      if (usernameOwner) {
+        res.status(409).json({ message: "This username is already taken." });
         return;
       }
       if (existing?.otpLockedUntil && existing.otpLockedUntil.getTime() > now) {
@@ -1363,6 +1404,7 @@ async function registerUser(req, res) {
       await sendOtpEmail(normalizedEmail, trimmedName, otp2);
       if (existing && !existing.isVerified) {
         existing.name = trimmedName;
+        existing.username = normalizedUsername;
         existing.password = password;
         existing.otpHash = otpHash2;
         existing.otpExpires = otpExpires;
@@ -1373,6 +1415,7 @@ async function registerUser(req, res) {
       } else {
         await UserModel.create({
           name: trimmedName,
+          username: normalizedUsername,
           email: normalizedEmail,
           password,
           role: "customer",
@@ -1393,9 +1436,18 @@ async function registerUser(req, res) {
       return;
     }
     const dbSnapshot = loadStore();
-    const existingLocal = dbSnapshot.users.find((u) => u.email === normalizedEmail);
+    const existingLocal = dbSnapshot.users.find(
+      (u) => u.email.trim().toLowerCase() === normalizedEmail
+    );
     if (existingLocal && existingLocal.isVerified) {
       res.status(409).json({ message: "An account with this email already exists." });
+      return;
+    }
+    const usernameOwnerLocal = dbSnapshot.users.find(
+      (u) => u.username?.trim().toLowerCase() === normalizedUsername && u.email.trim().toLowerCase() !== normalizedEmail
+    );
+    if (usernameOwnerLocal) {
+      res.status(409).json({ message: "This username is already taken." });
       return;
     }
     if (existingLocal?.otpLockedUntil && new Date(existingLocal.otpLockedUntil).getTime() > now) {
@@ -1423,9 +1475,17 @@ async function registerUser(req, res) {
     const otpLastSentIso = new Date(now).toISOString();
     await sendOtpEmail(normalizedEmail, trimmedName, otp);
     await runStoreTransaction(async (db) => {
-      const existing = db.users.find((u) => u.email === normalizedEmail);
+      const existing = db.users.find((u) => u.email.trim().toLowerCase() === normalizedEmail);
       if (existing && existing.isVerified) {
         const err = new Error("An account with this email already exists.");
+        err.status = 409;
+        throw err;
+      }
+      const usernameOwner = db.users.find(
+        (u) => u.username?.trim().toLowerCase() === normalizedUsername && u.email.trim().toLowerCase() !== normalizedEmail
+      );
+      if (usernameOwner) {
+        const err = new Error("This username is already taken.");
         err.status = 409;
         throw err;
       }
@@ -1433,6 +1493,7 @@ async function registerUser(req, res) {
       const nowIso = new Date(now).toISOString();
       if (existing && !existing.isVerified) {
         existing.name = trimmedName;
+        existing.username = normalizedUsername;
         existing.password = hashedPassword;
         existing.otpHash = otpHash;
         existing.otpExpires = otpExpiresIso;
@@ -1444,6 +1505,7 @@ async function registerUser(req, res) {
         db.users.push({
           _id: generateObjectId(),
           name: trimmedName,
+          username: normalizedUsername,
           email: normalizedEmail,
           password: hashedPassword,
           role: "customer",
@@ -1475,9 +1537,16 @@ async function registerUser(req, res) {
     });
   } catch (err) {
     const error = err;
+    if (error.code === 11e3) {
+      const duplicateField = error.keyPattern?.username ? "username" : error.keyPattern?.email ? "email" : null;
+      res.status(409).json({
+        message: duplicateField === "username" ? "This username is already taken." : duplicateField === "email" ? "An account with this email already exists." : "An account with this email or username already exists."
+      });
+      return;
+    }
     res.status(error.status || 500).json({
       message: error.message || "Registration failed.",
-      code: error.code
+      code: typeof error.code === "string" ? error.code : void 0
     });
   }
 }
@@ -1492,9 +1561,7 @@ async function verifyOtp(req, res) {
     const cleanOtp = otp.trim();
     const now = Date.now();
     if (isMongoConnected()) {
-      const user = await UserModel.findOne({ email: normalizedEmail }).select(
-        "+otpHash +otpExpires +otpAttempts +otpLockedUntil"
-      );
+      const user = await UserModel.findOne({ email: normalizedEmail }).collation({ locale: "en", strength: 2 }).select("+otpHash +otpExpires +otpAttempts +otpLockedUntil");
       if (!user) {
         res.status(404).json({ message: "Account not found." });
         return;
@@ -1561,6 +1628,7 @@ async function verifyOtp(req, res) {
         user: {
           id: user._id.toString(),
           name: user.name,
+          username: user.username,
           email: user.email,
           role: user.role,
           isVerified: user.isVerified,
@@ -1571,7 +1639,9 @@ async function verifyOtp(req, res) {
       return;
     }
     const dbCheck = loadStore();
-    const candidate = dbCheck.users.find((u) => u.email === normalizedEmail);
+    const candidate = dbCheck.users.find(
+      (u) => u.email.trim().toLowerCase() === normalizedEmail
+    );
     if (!candidate) {
       res.status(404).json({ message: "Account not found." });
       return;
@@ -1593,7 +1663,9 @@ async function verifyOtp(req, res) {
     }
     if (new Date(candidate.otpExpires).getTime() < now) {
       await runStoreTransaction((db) => {
-        const user = db.users.find((u) => u.email === normalizedEmail);
+        const user = db.users.find(
+          (u) => u.email.trim().toLowerCase() === normalizedEmail
+        );
         if (user) {
           user.otpHash = null;
           user.otpExpires = null;
@@ -1606,7 +1678,9 @@ async function verifyOtp(req, res) {
     const isMatch = await bcrypt3.compare(cleanOtp, candidate.otpHash);
     if (!isMatch) {
       const attemptResult = await runStoreTransaction((db) => {
-        const user = db.users.find((u) => u.email === normalizedEmail);
+        const user = db.users.find(
+          (u) => u.email.trim().toLowerCase() === normalizedEmail
+        );
         if (!user) return { locked: false, remaining: 0 };
         user.otpAttempts = (user.otpAttempts || 0) + 1;
         user.updatedAt = new Date(now).toISOString();
@@ -1630,7 +1704,9 @@ async function verifyOtp(req, res) {
       return;
     }
     const verifiedUser = await runStoreTransaction((db) => {
-      const user = db.users.find((u) => u.email === normalizedEmail);
+      const user = db.users.find(
+        (u) => u.email.trim().toLowerCase() === normalizedEmail
+      );
       if (!user) {
         const err = new Error("Account not found.");
         err.status = 404;
@@ -1658,6 +1734,7 @@ async function verifyOtp(req, res) {
       user: {
         id: verifiedUser._id,
         name: verifiedUser.name,
+        username: verifiedUser.username,
         email: verifiedUser.email,
         role: verifiedUser.role,
         isVerified: verifiedUser.isVerified,
@@ -1684,9 +1761,7 @@ async function resendOtp(req, res) {
     const otpExpires = new Date(now + OTP_EXPIRY_MS);
     const otpLastSentAt = new Date(now);
     if (isMongoConnected()) {
-      const user = await UserModel.findOne({ email: normalizedEmail }).select(
-        "+otpLastSentAt +otpLockedUntil"
-      );
+      const user = await UserModel.findOne({ email: normalizedEmail }).collation({ locale: "en", strength: 2 }).select("+otpLastSentAt +otpLockedUntil");
       if (!user) {
         res.status(404).json({ message: "No account found with this email." });
         return;
@@ -1726,7 +1801,9 @@ async function resendOtp(req, res) {
       return;
     }
     const dbSnapshot = loadStore();
-    const userLocal = dbSnapshot.users.find((u) => u.email === normalizedEmail);
+    const userLocal = dbSnapshot.users.find(
+      (u) => u.email.trim().toLowerCase() === normalizedEmail
+    );
     if (!userLocal) {
       res.status(404).json({ message: "No account found with this email." });
       return;
@@ -1754,7 +1831,9 @@ async function resendOtp(req, res) {
     }
     await sendOtpEmail(normalizedEmail, userLocal.name, otp);
     await runStoreTransaction((db) => {
-      const user = db.users.find((u) => u.email === normalizedEmail);
+      const user = db.users.find(
+        (u) => u.email.trim().toLowerCase() === normalizedEmail
+      );
       if (!user) return;
       user.otpHash = otpHash;
       user.otpExpires = otpExpires.toISOString();
@@ -1777,16 +1856,20 @@ async function resendOtp(req, res) {
 }
 async function loginUser(req, res) {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      res.status(400).json({ message: "Please enter both email and password." });
+    const { identifier, email, password } = req.body;
+    const loginIdentifier = identifier ?? email;
+    if (typeof loginIdentifier !== "string" || !loginIdentifier.trim() || typeof password !== "string" || !password) {
+      res.status(400).json({ message: "Please enter an email or username and password." });
       return;
     }
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedIdentifier = loginIdentifier.trim().toLowerCase();
     if (isMongoConnected()) {
-      const user2 = await UserModel.findOne({ email: normalizedEmail }).select("+password");
-      if (!user2 || !await user2.comparePassword(password)) {
-        res.status(401).json({ message: "Invalid email or password." });
+      const user2 = await UserModel.findOne({
+        $or: [{ email: normalizedIdentifier }, { username: normalizedIdentifier }]
+      }).collation({ locale: "en", strength: 2 }).select("+password");
+      const passwordMatches2 = user2 ? await user2.comparePassword(password) : await bcrypt3.compare(password, DUMMY_PASSWORD_HASH);
+      if (!user2 || !passwordMatches2) {
+        res.status(401).json({ message: "Invalid email/username or password." });
         return;
       }
       if (!user2.isVerified) {
@@ -1809,6 +1892,7 @@ async function loginUser(req, res) {
         user: {
           id: user2._id.toString(),
           name: user2.name,
+          username: user2.username,
           email: user2.email,
           role: user2.role,
           isVerified: user2.isVerified,
@@ -1819,9 +1903,15 @@ async function loginUser(req, res) {
       return;
     }
     const db = loadStore();
-    const user = db.users.find((u) => u.email === normalizedEmail);
-    if (!user || !await bcrypt3.compare(password, user.password)) {
-      res.status(401).json({ message: "Invalid email or password." });
+    const user = db.users.find(
+      (u) => u.email.trim().toLowerCase() === normalizedIdentifier || u.username?.trim().toLowerCase() === normalizedIdentifier
+    );
+    const passwordMatches = await bcrypt3.compare(
+      password,
+      user?.password ?? DUMMY_PASSWORD_HASH
+    );
+    if (!user || !passwordMatches) {
+      res.status(401).json({ message: "Invalid email/username or password." });
       return;
     }
     if (!user.isVerified) {
@@ -1844,6 +1934,7 @@ async function loginUser(req, res) {
       user: {
         id: user._id,
         name: user.name,
+        username: user.username,
         email: user.email,
         role: user.role,
         isVerified: user.isVerified,
@@ -1852,7 +1943,8 @@ async function loginUser(req, res) {
       }
     });
   } catch (err) {
-    res.status(500).json({ message: err.message || "Login failed." });
+    console.error("[BookHaven Auth] Login failed:", err);
+    res.status(500).json({ message: "Unable to sign in right now. Please try again later." });
   }
 }
 async function getProfile(req, res) {
@@ -1871,6 +1963,7 @@ async function getProfile(req, res) {
         user: {
           id: user2._id.toString(),
           name: user2.name,
+          username: user2.username,
           email: user2.email,
           role: user2.role,
           isVerified: user2.isVerified,
@@ -1890,6 +1983,7 @@ async function getProfile(req, res) {
       user: {
         id: user._id,
         name: user.name,
+        username: user.username,
         email: user.email,
         role: user.role,
         isVerified: user.isVerified,
@@ -1921,6 +2015,7 @@ async function updateProfile(req, res) {
         user: {
           id: user._id.toString(),
           name: user.name,
+          username: user.username,
           email: user.email,
           role: user.role,
           isVerified: user.isVerified,
@@ -1946,6 +2041,7 @@ async function updateProfile(req, res) {
       user: {
         id: updated._id,
         name: updated.name,
+        username: updated.username,
         email: updated.email,
         role: updated.role,
         isVerified: updated.isVerified,
@@ -2006,11 +2102,19 @@ async function toggleWishlist(req, res) {
 // backend/middleware/rateLimitMiddleware.ts
 function createRateLimiter(options) {
   const buckets = /* @__PURE__ */ new Map();
+  let nextCleanupAt = Date.now() + Math.min(options.windowMs, 6e4);
   return (req, res, next) => {
     const now = Date.now();
+    if (now >= nextCleanupAt) {
+      for (const [key2, bucket] of buckets) {
+        if (bucket.resetAt <= now) buckets.delete(key2);
+      }
+      nextCleanupAt = now + Math.min(options.windowMs, 6e4);
+    }
     const clientIp = req.ip || req.socket.remoteAddress || "unknown";
-    const emailPart = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
-    const key = `${options.keyPrefix}:${clientIp}:${emailPart}`;
+    const identity = req.body?.identifier ?? req.body?.email;
+    const identityPart = !options.keyByIpOnly && typeof identity === "string" ? identity.trim().toLowerCase() : "";
+    const key = `${options.keyPrefix}:${clientIp}:${identityPart}`;
     const existing = buckets.get(key);
     if (!existing || existing.resetAt <= now) {
       buckets.set(key, { count: 1, resetAt: now + options.windowMs });
@@ -2055,7 +2159,8 @@ var loginLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1e3,
   maxRequests: 15,
   keyPrefix: "login",
-  message: "Too many sign-in attempts. Please wait before trying again."
+  message: "Too many sign-in attempts. Please wait before trying again.",
+  keyByIpOnly: true
 });
 router2.post("/register", registerLimiter, registerUser);
 router2.post("/verify-otp", verifyOtpLimiter, verifyOtp);
@@ -3249,6 +3354,7 @@ async function seedMongoIfEmpty() {
     await UserModel.insertMany(
       seed.users.map((u) => ({
         name: u.name,
+        username: u.username,
         email: u.email,
         password: u.password,
         role: u.role,
@@ -3269,7 +3375,7 @@ async function seedMongoIfEmpty() {
 }
 async function createApp() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3e3;
+  const PORT2 = Number(process.env.PORT) || 3e3;
   await connectDatabase();
   if (isMongoConnected()) {
     await seedMongoIfEmpty();
@@ -3311,18 +3417,18 @@ async function createApp() {
   }
   return app;
 }
-var isDirectRun = process.argv[1] && import.meta.url.endsWith(process.argv[1].replaceAll("\\\\", "/"));
-if (isDirectRun) {
-  createApp().then((app) => {
-    const PORT = Number(process.env.PORT) || 3e3;
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`[BookHaven Server] Running on http://0.0.0.0:${PORT}`);
-    });
-  }).catch((err) => {
-    console.error("[BookHaven Server] Fatal startup error:", err);
-    process.exit(1);
+var PORT = Number(process.env.PORT) || 3e3;
+createApp().then((app) => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[BookHaven Server] Running on http://localhost:${PORT}`);
   });
-}
+  server.on("error", (err) => {
+    console.error("[BookHaven Server] Listen error:", err);
+  });
+}).catch((err) => {
+  console.error("[BookHaven Server] Fatal startup error:", err);
+  process.exit(1);
+});
 var server_default = createApp;
 export {
   createApp,
