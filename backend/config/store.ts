@@ -6,6 +6,7 @@ import { OrderStatus, PaymentMethod, VerificationStatus } from '../models/Order.
 export interface StoreUser {
   _id: string;
   name: string;
+  username?: string;
   email: string;
   password: string;
   role: 'customer' | 'admin';
@@ -194,6 +195,7 @@ export function buildSeedData(): StoreDatabase {
     {
       _id: customerId,
       name: 'Aye Chan Moe',
+      username: 'ayechanmoe',
       email: 'aye@bookhaven.mm',
       password: customerPassword,
       role: 'customer',
@@ -218,6 +220,7 @@ export function buildSeedData(): StoreDatabase {
     {
       _id: adminId,
       name: 'Thant Zin Oo',
+      username: 'admin',
       email: 'admin@bookhaven.mm',
       password: adminPassword,
       role: 'admin',
