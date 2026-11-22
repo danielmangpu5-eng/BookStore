@@ -1,53 +1,53 @@
-import { Router } from 'express';
-import {
-  getProfile,
-  loginUser,
-  registerUser,
-  resendOtp,
-  toggleWishlist,
-  updateProfile,
-  verifyOtp,
-} from '../controllers/authController.ts';
-import { protect } from '../middleware/authMiddleware.ts';
-import { createRateLimiter } from '../middleware/rateLimitMiddleware.ts';
+import { NextFunction, Request, Response } from 'express';
 
-const router = Router();
+interface RateBucket {
+  count: number;
+  resetAt: number;
+}
 
-const registerLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  maxRequests: 10,
-  keyPrefix: 'register',
-  message: 'Too many registration attempts. Please try again in a few minutes.',
-});
+export function createRateLimiter(options: {
+  windowMs: number;
+  maxRequests: number;
+  keyPrefix: string;
+  message: string;
+  keyByIpOnly?: boolean;
+}) {
+  const buckets = new Map<string, RateBucket>();
+  let nextCleanupAt = Date.now() + Math.min(options.windowMs, 60_000);
 
-const verifyOtpLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  maxRequests: 10,
-  keyPrefix: 'verify-otp',
-  message: 'Too many verification attempts. Please wait before trying again.',
-});
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const now = Date.now();
+    if (now >= nextCleanupAt) {
+      for (const [key, bucket] of buckets) {
+        if (bucket.resetAt <= now) buckets.delete(key);
+      }
+      nextCleanupAt = now + Math.min(options.windowMs, 60_000);
+    }
 
-const resendOtpLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  maxRequests: 6,
-  keyPrefix: 'resend-otp',
-  message: 'Too many code resend requests. Please wait before trying again.',
-});
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    const identity = req.body?.identifier ?? req.body?.email;
+    const identityPart =
+      !options.keyByIpOnly && typeof identity === 'string' ? identity.trim().toLowerCase() : '';
+    const key = `${options.keyPrefix}:${clientIp}:${identityPart}`;
 
-const loginLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  maxRequests: 15,
-  keyPrefix: 'login',
-  message: 'Too many sign-in attempts. Please wait before trying again.',
-  keyByIpOnly: true,
-});
+    const existing = buckets.get(key);
+    if (!existing || existing.resetAt <= now) {
+      buckets.set(key, { count: 1, resetAt: now + options.windowMs });
+      next();
+      return;
+    }
 
-router.post('/register', registerLimiter, registerUser);
-router.post('/verify-otp', verifyOtpLimiter, verifyOtp);
-router.post('/resend-otp', resendOtpLimiter, resendOtp);
-router.post('/login', loginLimiter, loginUser);
-router.get('/profile', protect, getProfile);
-router.put('/profile', protect, updateProfile);
-router.post('/wishlist/:bookId', protect, toggleWishlist);
+    if (existing.count >= options.maxRequests) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      res.status(429).json({
+        message: options.message,
+        retryAfterSeconds,
+      });
+      return;
+    }
 
-export default router;
+    existing.count += 1;
+    next();
+  };
+}
