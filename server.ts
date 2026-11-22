@@ -50,6 +50,7 @@ async function seedMongoIfEmpty() {
     await UserModel.insertMany(
       seed.users.map((u) => ({
         name: u.name,
+        username: u.username,
         email: u.email,
         password: u.password,
         role: u.role,
@@ -129,20 +130,23 @@ export async function createApp() {
   return app;
 }
 
-const isDirectRun = process.argv[1] && import.meta.url.endsWith(process.argv[1].replaceAll('\\\\', '/'));
 
-if (isDirectRun) {
-  createApp()
-    .then((app) => {
-      const PORT = Number(process.env.PORT) || 3000;
-      app.listen(PORT, '0.0.0.0', () => {
-        console.log(`[BookHaven Server] Running on http://0.0.0.0:${PORT}`);
-      });
-    })
-    .catch((err) => {
-      console.error('[BookHaven Server] Fatal startup error:', err);
-      process.exit(1);
+const PORT = Number(process.env.PORT) || 3000;
+
+createApp()
+  .then((app) => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`[BookHaven Server] Running on http://localhost:${PORT}`);
     });
-}
+
+    server.on('error', (err) => {
+      console.error('[BookHaven Server] Listen error:', err);
+    });
+  })
+  .catch((err) => {
+    console.error('[BookHaven Server] Fatal startup error:', err);
+    process.exit(1);
+  });
+
 
 export default createApp;
