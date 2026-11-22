@@ -39,6 +39,7 @@ const loginLimiter = createRateLimiter({
   maxRequests: 15,
   keyPrefix: 'login',
   message: 'Too many sign-in attempts. Please wait before trying again.',
+  keyByIpOnly: true,
 });
 
 router.post('/register', registerLimiter, registerUser);
